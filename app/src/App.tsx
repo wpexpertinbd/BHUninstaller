@@ -195,7 +195,19 @@ export default function App() {
     setBusy(true);
     try {
       const p = await api.planUninstall(app.id);
-      if (p) setPlan(p);
+      if (p) {
+        setPlan(p);
+        return;
+      }
+      // No plan means the engine could not find that application any more —
+      // nearly always because it has just been removed and this row is stale.
+      // Doing nothing here is what made the Uninstall button look broken:
+      // the row was still on screen, the click produced no sheet, no error,
+      // nothing, and only quitting and reopening the app brought it back.
+      setError(
+        `${app.name || "That application"} is no longer installed — the list has been refreshed.`
+      );
+      setApps(await api.listApps(true));
     } finally {
       setBusy(false);
     }

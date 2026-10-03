@@ -349,14 +349,33 @@ pub fn execute(plan: &RemovalPlan, opts: RemovalOptions) -> RemovalReport {
                 }
             }
             Err(e) => {
+                // WARNING: the exit status is a hint, not the outcome. The
+                // elevated script moves the items and then tries to hand them
+                // back to the user with `chown`; that second step can fail on
+                // its own (`~/.Trash` is TCC-protected even from root) long
+                // after the move has succeeded. Believing the status reported
+                // "Nothing was removed" for two applications that had in fact
+                // just been moved into the Trash.
+                //
+                // So each path is checked on disk. Gone is gone, whatever the
+                // script returned — and it is journalled as removed, because a
+                // removal the app denies having done is one the user cannot
+                // undo from History either.
                 let message = elevated_failure_message(&e, &deferred);
-                for (path, _) in deferred {
+                for (path, size) in deferred {
+                    let moved = fs::symlink_metadata(&path).is_err();
+                    if moved {
+                        bytes_freed += size;
+                    }
                     outcomes.push(RemovalOutcome {
                         path,
-                        removed: false,
+                        removed: moved,
                         already_gone: false,
+                        // Where it landed is only known when the script
+                        // reported success, so this stays empty — History
+                        // shows it as removed but not restorable from here.
                         trashed_to: None,
-                        error: Some(message.clone()),
+                        error: if moved { None } else { Some(message.clone()) },
                     });
                 }
             }

@@ -58,6 +58,20 @@ pub fn trash_elevated(paths: &[PathBuf], stamp: &str) -> Result<PathBuf, String>
     // Every path is passed as a separate argument and quoted by AppleScript's
     // `quoted form of`. Nothing is ever interpolated into the shell string —
     // a single quote in a filename would otherwise be arbitrary code as root.
+    //
+    // WARNING: the `chown` is deliberately NOT part of the `&&` chain's
+    // success. It exists only so the quarantined items end up belonging to the
+    // user rather than to root, which is a convenience — the move is the
+    // operation. And it fails: `~/.Trash` is TCC-protected, and the root shell
+    // this spawns is still subject to that, so `chown` returns "Operation not
+    // permitted" even as root.
+    //
+    // While it was chained with `&&`, that failure made the whole script exit
+    // non-zero **after the move had already happened** — so the app moved two
+    // applications into the Trash and told the user "Nothing was removed".
+    // Reporting a completed removal as a failure is worse than the failure it
+    // was describing, because the user then goes looking for apps that are
+    // gone. `|| true` keeps a `chown` failure from speaking for the `mv`.
     let script = r#"on run argv
     set destPath to item 1 of argv
     set uidgid to item 2 of argv
@@ -66,7 +80,7 @@ pub fn trash_elevated(paths: &[PathBuf], stamp: &str) -> Result<PathBuf, String>
         set cmd to cmd & " " & quoted form of (item i of argv)
     end repeat
     set cmd to cmd & " " & quoted form of destPath
-    set cmd to cmd & " && /usr/sbin/chown -R " & uidgid & " " & quoted form of destPath
+    set cmd to cmd & " && { /usr/sbin/chown -R " & uidgid & " " & quoted form of destPath & " || true; }"
     do shell script cmd with administrator privileges
 end run"#;
 
@@ -319,4 +333,67 @@ Set-Content -LiteralPath $done -Value $ok -Encoding UTF8
 #[cfg(not(target_os = "windows"))]
 pub fn registry_remove_elevated(_keys: &[(String, PathBuf)]) -> Result<(), String> {
     Err("registry keys only exist on Windows".into())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    /// The shell composition the elevated script builds, exercised directly.
+    ///
+    /// WARNING: this is here because the `&&` version of it moved two of the
+    /// user's applications into the Trash and then reported "Nothing was
+    /// removed", because the `chown` that follows the move failed on its own.
+    /// The three cases below are the whole contract: a failing `chown` must
+    /// not speak for a successful move, and a failing move must still fail.
+    fn run(mv_src: &str, dest: &str, chown_clause: &str) -> i32 {
+        let cmd = format!("/bin/mv -f '{mv_src}' '{dest}' {chown_clause}",);
+        crate::proc::command("/bin/sh")
+            .arg("-c")
+            .arg(cmd)
+            .status()
+            .expect("sh")
+            .code()
+            .unwrap_or(-1)
+    }
+
+    /// `nosuchuser:nosuchgroup` makes `chown` fail the way the real one does
+    /// in `~/.Trash`, without needing root or a protected location.
+    const FAILING_CHOWN: &str = "/usr/sbin/chown -R nosuchuser:nosuchgroup";
+
+    #[test]
+    fn a_failing_chown_does_not_fail_a_successful_move() {
+        let dir = crate::proc::private_temp_dir("bhu-elev").unwrap();
+        let dest = dir.join("dest");
+        std::fs::create_dir(&dest).unwrap();
+        let src = dir.join("payload.txt");
+        std::fs::write(&src, b"hello").unwrap();
+
+        let code = run(
+            &src.to_string_lossy(),
+            &dest.to_string_lossy(),
+            &format!("&& {{ {FAILING_CHOWN} '{}' || true; }}", dest.display()),
+        );
+
+        assert_eq!(code, 0, "a chown failure must not be reported as failure");
+        assert!(
+            dest.join("payload.txt").exists(),
+            "the move itself must still have happened"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failing_move_is_still_reported() {
+        let dir = crate::proc::private_temp_dir("bhu-elev").unwrap();
+        let dest = dir.join("dest");
+        std::fs::create_dir(&dest).unwrap();
+
+        let code = run(
+            &dir.join("does-not-exist").to_string_lossy(),
+            &dest.to_string_lossy(),
+            &format!("&& {{ {FAILING_CHOWN} '{}' || true; }}", dest.display()),
+        );
+
+        assert_ne!(code, 0, "tolerating chown must not mask a failed move");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
