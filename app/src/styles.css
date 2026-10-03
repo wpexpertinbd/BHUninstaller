@@ -330,13 +330,32 @@ button { font: inherit; color: inherit; cursor: default; }
 
 /* ---------- review sheet ---------- */
 
+/* WARNING: two separate things kept the review sheet under the macOS window
+   controls.
+
+   1. The window uses an overlay title bar (`titleBarStyle: Overlay`), so the
+      red/yellow/green buttons float over the page at the top-left. Any sheet
+      must start below them — hence a deeper top inset than the other sides.
+      On Windows and Linux the title bar is native, so it is only a little
+      more margin there.
+
+   2. `max-height: 100%` did not clamp at all. On a grid item whose row is
+      sized to its content, the percentage resolves against that same content
+      height, so a tall sheet simply overflowed the backdrop — evenly above
+      and below, past the padding, and up under the window controls. The
+      ceiling is now measured from the viewport, which is absolute. */
 .sheet-backdrop {
+  --sheet-top: 46px;
+  --sheet-edge: 28px;
   position: fixed; inset: 0; background: rgba(15, 23, 42, .45);
-  display: grid; place-items: center; padding: 32px; z-index: 100;
+  display: grid; place-items: center;
+  padding: var(--sheet-top) var(--sheet-edge) var(--sheet-edge);
+  z-index: 100;
   backdrop-filter: blur(2px);
 }
 .sheet {
-  width: min(1000px, 100%); max-height: 100%;
+  width: min(1000px, 100%);
+  max-height: calc(100vh - var(--sheet-top) - var(--sheet-edge));
   background: var(--bg); border-radius: 16px; box-shadow: var(--shadow);
   display: flex; flex-direction: column; overflow: hidden;
 }
