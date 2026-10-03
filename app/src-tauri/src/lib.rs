@@ -76,6 +76,57 @@ fn was_offered(item: &RemovalItem, paths: &HashSet<PathBuf>, keys: &HashSet<Stri
 }
 
 impl Cache {
+    /// The scanned lists, filling a cache that is empty.
+    ///
+    /// WARNING: an empty cache means "not scanned yet" — it never means
+    /// "nothing is installed". `execute_plan` empties every cache on purpose,
+    /// so that entries describing something just removed cannot outlive it.
+    /// Readers that took empty as the answer therefore replied "no such item"
+    /// to everything after any removal: the Uninstall button silently did
+    /// nothing, with the rows still on screen because the interface keeps its
+    /// own copy, and only quitting and reopening the app brought it back.
+    /// Every reader goes through these, so the rule holds in one place
+    /// instead of five.
+    fn apps(&self) -> Vec<InstalledApp> {
+        let mut apps = self.apps.lock().unwrap();
+        if apps.is_empty() {
+            *apps = discovery::installed_apps(discovery::ScanOptions::default());
+        }
+        apps.clone()
+    }
+
+    fn orphans(&self) -> Vec<OrphanGroup> {
+        let mut groups = self.orphans.lock().unwrap();
+        if groups.is_empty() {
+            *groups = bhu_core::scan_orphans();
+        }
+        groups.clone()
+    }
+
+    fn extensions(&self) -> Vec<ExtensionGroup> {
+        let mut groups = self.extensions.lock().unwrap();
+        if groups.is_empty() {
+            *groups = bhu_core::extensions::list();
+        }
+        groups.clone()
+    }
+
+    fn junk(&self) -> Vec<JunkGroup> {
+        let mut groups = self.junk.lock().unwrap();
+        if groups.is_empty() {
+            *groups = bhu_core::cleaner::scan();
+        }
+        groups.clone()
+    }
+
+    fn startup(&self) -> Vec<StartupItem> {
+        let mut items = self.startup.lock().unwrap();
+        if items.is_empty() {
+            *items = bhu_core::startup::list();
+        }
+        items.clone()
+    }
+
     /// Record what a plan put in front of the user.
     fn offer(&self, plan: &RemovalPlan) {
         let mut offered = self.offered.lock().unwrap();
@@ -120,13 +171,7 @@ fn app_icons(cache: State<Cache>) -> HashMap<String, String> {
 /// last opened, whether it is running.
 #[tauri::command]
 fn app_details(id: String, cache: State<Cache>) -> Option<InstalledApp> {
-    let app = cache
-        .apps
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|a| a.id == id)
-        .cloned()?;
+    let app = cache.apps().iter().find(|a| a.id == id).cloned()?;
     let mut app = app;
     discovery::enrich(&mut app);
     Some(app)
@@ -135,7 +180,7 @@ fn app_details(id: String, cache: State<Cache>) -> Option<InstalledApp> {
 /// The dry run: what uninstalling this app would remove.
 #[tauri::command]
 fn plan_uninstall(id: String, cache: State<Cache>) -> Option<RemovalPlan> {
-    let apps = cache.apps.lock().unwrap().clone();
+    let apps = cache.apps();
     let app = apps.iter().find(|a| a.id == id)?.clone();
     let mut app = app;
     discovery::enrich(&mut app);
@@ -160,7 +205,7 @@ fn orphan_groups(refresh: bool, cache: State<Cache>) -> Vec<OrphanGroup> {
 /// A plan for the selected orphan groups.
 #[tauri::command]
 fn plan_orphans(names: Vec<String>, cache: State<Cache>) -> RemovalPlan {
-    let groups = cache.orphans.lock().unwrap().clone();
+    let groups = cache.orphans();
     let items: Vec<Leftover> = groups
         .into_iter()
         .filter(|g| names.contains(&g.name))
@@ -238,9 +283,7 @@ fn startup_items(refresh: bool, cache: State<Cache>) -> Vec<StartupItem> {
 #[tauri::command]
 fn set_startup_enabled(id: String, enabled: bool, cache: State<Cache>) -> Result<(), String> {
     let item = cache
-        .startup
-        .lock()
-        .unwrap()
+        .startup()
         .iter()
         .find(|i| i.id == id)
         .cloned()
@@ -265,7 +308,7 @@ fn extension_groups(refresh: bool, cache: State<Cache>) -> Vec<ExtensionGroup> {
 /// pre-selected, but they still see the full list with paths before it runs.
 #[tauri::command]
 fn plan_extensions(ids: Vec<String>, cache: State<Cache>) -> RemovalPlan {
-    let groups = cache.extensions.lock().unwrap().clone();
+    let groups = cache.extensions();
     let items: Vec<Leftover> = groups
         .iter()
         .flat_map(|g| g.items.iter())
@@ -297,7 +340,7 @@ fn junk_groups(refresh: bool, cache: State<Cache>) -> Vec<JunkGroup> {
 /// something sent the wrong id.
 #[tauri::command]
 fn plan_cleanup(ids: Vec<String>, cache: State<Cache>) -> RemovalPlan {
-    let groups = cache.junk.lock().unwrap().clone();
+    let groups = cache.junk();
     let items: Vec<Leftover> = groups
         .iter()
         .filter(|g| g.removable)

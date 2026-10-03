@@ -46,10 +46,24 @@ impl TrashError {
     /// phrases are specific rather than a bare search for "permission".
     pub fn is_permission_denied(&self) -> bool {
         let TrashError::Failed(message) = self;
-        let m = message.to_lowercase();
+        // WARNING: macOS writes this message with TYPOGRAPHIC punctuation, not
+        // ASCII — the apostrophe in "you don’t have permission" is U+2019. A
+        // match written with a plain `'` never fires against it, which is
+        // exactly how this shipped broken once. Apostrophes are folded to
+        // ASCII first, and "permission to access" is matched as well because
+        // it carries no apostrophe at all.
+        let m: String = message
+            .to_lowercase()
+            .chars()
+            .map(|c| match c {
+                '\u{2018}' | '\u{2019}' | '\u{02bc}' | '\u{00b4}' | '`' => '\'',
+                _ => c,
+            })
+            .collect();
         m.contains("permission denied")
             || m.contains("operation not permitted")
             || m.contains("access is denied")
+            || m.contains("permission to access")
             || m.contains("don't have permission")
             || m.contains("do not have permission")
     }
@@ -131,16 +145,17 @@ pub const fn can_restore_programmatically() -> bool {
 mod tests {
     use super::*;
 
-    /// The macOS wording is verbatim from a real failure: an application
-    /// installed by a `.pkg` (owned by root) in a `/Applications` that the
-    /// admin user *can* write to, which is exactly the case the elevated
-    /// retry exists for.
+    /// WARNING: the macOS string below carries the punctuation macOS really
+    /// emits — curly quotes and a U+2019 apostrophe. An earlier version of
+    /// this test was TYPED OUT by hand with ASCII punctuation, so it passed
+    /// against a predicate that could not match the real thing, the elevated
+    /// retry silently never fired, and the fix shipped doing nothing.
+    /// Copy error text from the failure; never retype it.
     #[test]
     fn a_permission_refusal_is_recognised_whatever_the_platform_calls_it() {
         for message in [
-            "Error during a `trash` operation: Unknown { description: \"While deleting \
-             '\\\"/Applications/Display Portal.app\\\"', `trashItemAtURL` failed: \"Display Portal\" \
-             couldn't be moved to the trash because you don't have permission to access it.\" }",
+            // Verbatim from a real failure on macOS 27.0.1.
+            "Error during a `trash` operation: Unknown { description: “Display Portal” couldn’t be moved to the trash because you don’t have permission to access it.",
             "Permission denied (os error 13)",
             "Operation not permitted (os error 1)",
             "Access is denied. (os error 5)",
