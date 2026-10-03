@@ -28,6 +28,33 @@ pub enum TrashError {
     Failed(String),
 }
 
+impl TrashError {
+    /// Whether the operating system refused this on permissions.
+    ///
+    /// ⚠️ Worth knowing *why* this is a string match. The `trash` crate
+    /// flattens every platform failure into prose, so there is no error code
+    /// left to test by the time it reaches here — the wording below is what
+    /// each platform actually produces:
+    ///
+    /// - macOS, `NSFileManager`: *"… couldn't be moved to the trash because
+    ///   you don't have permission to access it."*
+    /// - POSIX: `Permission denied` (EACCES), `Operation not permitted` (EPERM)
+    /// - Windows: `Access is denied`
+    ///
+    /// Matching too widely here would send a genuinely impossible removal to
+    /// the elevated path and ask for a password that cannot help, so the
+    /// phrases are specific rather than a bare search for "permission".
+    pub fn is_permission_denied(&self) -> bool {
+        let TrashError::Failed(message) = self;
+        let m = message.to_lowercase();
+        m.contains("permission denied")
+            || m.contains("operation not permitted")
+            || m.contains("access is denied")
+            || m.contains("don't have permission")
+            || m.contains("do not have permission")
+    }
+}
+
 /// Move a path to the trash, returning where it ended up when that can be
 /// determined. Never follows symlinks: a symlink is trashed as the link itself.
 pub fn move_to_trash(path: &Path, sound: bool) -> Result<Option<PathBuf>, TrashError> {
@@ -98,4 +125,47 @@ fn locate_in_trash(_original: &Path) -> Option<PathBuf> {
 /// so the UI must not promise "Put Back" unconditionally.
 pub const fn can_restore_programmatically() -> bool {
     cfg!(any(target_os = "windows", target_os = "linux"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The macOS wording is verbatim from a real failure: an application
+    /// installed by a `.pkg` (owned by root) in a `/Applications` that the
+    /// admin user *can* write to, which is exactly the case the elevated
+    /// retry exists for.
+    #[test]
+    fn a_permission_refusal_is_recognised_whatever_the_platform_calls_it() {
+        for message in [
+            "Error during a `trash` operation: Unknown { description: \"While deleting \
+             '\\\"/Applications/Display Portal.app\\\"', `trashItemAtURL` failed: \"Display Portal\" \
+             couldn't be moved to the trash because you don't have permission to access it.\" }",
+            "Permission denied (os error 13)",
+            "Operation not permitted (os error 1)",
+            "Access is denied. (os error 5)",
+        ] {
+            assert!(
+                TrashError::Failed(message.to_string()).is_permission_denied(),
+                "should have been read as a permission refusal: {message}"
+            );
+        }
+    }
+
+    /// Matching too widely would send an impossible removal to the elevated
+    /// path and ask for a password that cannot help.
+    #[test]
+    fn other_failures_are_not_mistaken_for_permission() {
+        for message in [
+            "No such file or directory (os error 2)",
+            "No space left on device (os error 28)",
+            "Read-only file system (os error 30)",
+            "could not determine the trash directory",
+        ] {
+            assert!(
+                !TrashError::Failed(message.to_string()).is_permission_denied(),
+                "should NOT have been read as a permission refusal: {message}"
+            );
+        }
+    }
 }

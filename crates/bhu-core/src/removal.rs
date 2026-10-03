@@ -278,6 +278,23 @@ pub fn execute(plan: &RemovalPlan, opts: RemovalOptions) -> RemovalReport {
                     error: None,
                 });
             }
+            Err(e) if e.is_permission_denied() => {
+                // ⚠️ `needs_elevation` is a PREDICTION — it asks whether the
+                // parent directory is writable — and it can be wrong.
+                // `/Applications` is group-writable by admin, so an app that a
+                // `.pkg` installed as root is predicted to need no password,
+                // and macOS then refuses the move anyway. (Since macOS 14 one
+                // app may not modify another's bundle without App Management,
+                // which Full Disk Access does not include.)
+                //
+                // A permission refusal is not a final answer, so it is not
+                // reported as one. The item joins the elevated batch and is
+                // retried as root, under the single password prompt the rest
+                // of that batch already asks for. Before this, the user was
+                // left looking at an application the uninstaller could see and
+                // could not remove.
+                deferred.push((item.path.clone(), size));
+            }
             Err(e) => outcomes.push(RemovalOutcome {
                 path: item.path.clone(),
                 removed: false,
@@ -332,13 +349,14 @@ pub fn execute(plan: &RemovalPlan, opts: RemovalOptions) -> RemovalReport {
                 }
             }
             Err(e) => {
+                let message = elevated_failure_message(&e, &deferred);
                 for (path, _) in deferred {
                     outcomes.push(RemovalOutcome {
                         path,
                         removed: false,
                         already_gone: false,
                         trashed_to: None,
-                        error: Some(e.clone()),
+                        error: Some(message.clone()),
                     });
                 }
             }
@@ -354,6 +372,34 @@ pub fn execute(plan: &RemovalPlan, opts: RemovalOptions) -> RemovalReport {
     };
     report.undo_id = undo::record(&report, plan.app.as_ref().map(|a| a.name.clone()));
     report
+}
+
+/// What to tell the user when even the elevated move failed.
+///
+/// If root could not move an application bundle, the remaining explanation on
+/// macOS is **App Management**: since macOS 14 one application may not modify
+/// or delete another's bundle without it, and ⚠️ Full Disk Access does **not**
+/// include it — they are separate permissions and granting the first does
+/// nothing for the second. Naming it is the difference between a dead end and
+/// something the user can actually fix.
+///
+/// Cancelling the password prompt is a choice and keeps its own wording.
+fn elevated_failure_message(error: &str, items: &[(std::path::PathBuf, u64)]) -> String {
+    let _ = items;
+    #[cfg(target_os = "macos")]
+    if error != "cancelled"
+        && items
+            .iter()
+            .any(|(p, _)| p.extension().and_then(|e| e.to_str()) == Some("app"))
+    {
+        return format!(
+            "{error}\n\nmacOS may be withholding App Management, which is the permission \
+             that lets one app remove another — Full Disk Access does not include it. \
+             Add BHUninstaller in System Settings → Privacy & Security → App Management, \
+             then try again."
+        );
+    }
+    error.to_string()
 }
 
 /// Run the platform's own uninstaller and wait for it.
